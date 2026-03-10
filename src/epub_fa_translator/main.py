@@ -38,6 +38,7 @@ ANCHOR_STATE_FILENAME = "concept-anchors.json"
 ANCHOR_MARKDOWN_FILENAME = "concept-anchors.md"
 XML_NS = "http://www.w3.org/XML/1998/namespace"
 XHTML_NS = "http://www.w3.org/1999/xhtml"
+EPUB_NS = "http://www.idpf.org/2007/ops"
 CONTAINER_NS = {"container": "urn:oasis:names:tc:opendocument:xmlns:container"}
 OPF_NS = {
     "opf": "http://www.idpf.org/2007/opf",
@@ -1714,7 +1715,17 @@ def relative_href_from_chapter(chapter_href: str, target_href: str) -> str:
 
 def enforce_persian_xhtml_defaults(xhtml_text: str, css_href: str) -> str:
     parser = etree.XMLParser(remove_blank_text=False, recover=False, resolve_entities=False)
-    root = etree.fromstring(xhtml_text.encode("utf-8"), parser=parser)
+    try:
+        root = etree.fromstring(xhtml_text.encode("utf-8"), parser=parser)
+    except etree.XMLSyntaxError as exc:
+        repaired_xhtml = restore_known_xhtml_namespaces(xhtml_text)
+        if repaired_xhtml == xhtml_text:
+            raise
+        try:
+            root = etree.fromstring(repaired_xhtml.encode("utf-8"), parser=parser)
+            xhtml_text = repaired_xhtml
+        except etree.XMLSyntaxError:
+            raise exc
 
     if etree.QName(root).localname.lower() != "html":
         raise ValueError("Translated chapter root element must be <html>.")
@@ -1749,6 +1760,26 @@ def enforce_persian_xhtml_defaults(xhtml_text: str, css_href: str) -> str:
         pretty_print=False,
     )
     return serialized.decode("utf-8")
+
+
+def restore_known_xhtml_namespaces(xhtml_text: str) -> str:
+    repaired = xhtml_text
+    repaired = ensure_namespace_declaration(repaired, "epub", EPUB_NS)
+    return repaired
+
+
+def ensure_namespace_declaration(xhtml_text: str, prefix: str, uri: str) -> str:
+    if f"{prefix}:" not in xhtml_text:
+        return xhtml_text
+    if re.search(rf"\bxmlns:{re.escape(prefix)}\s*=", xhtml_text):
+        return xhtml_text
+    return re.sub(
+        r"(<html\b[^>]*)(>)",
+        rf'\1 xmlns:{prefix}="{uri}"\2',
+        xhtml_text,
+        count=1,
+        flags=re.IGNORECASE,
+    )
 
 
 def find_child(root: etree._Element, local_name: str) -> etree._Element | None:
