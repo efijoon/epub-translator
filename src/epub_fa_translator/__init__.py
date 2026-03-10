@@ -1,0 +1,2 @@
+"""EPUB to Persian translator."""
+

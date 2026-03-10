@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "epub-fa-translator"
+version = "0.1.0"
+description = "Translate English EPUB books into polished Persian EPUBs chapter by chapter."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "lxml>=6.0.2",
+    "openai>=2.26.0",
+    "pypdf>=6.8.0",
+    "python-dotenv>=1.2.2",
+]
+
+[project.scripts]
+epub-fa-translator = "epub_fa_translator.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/epub_fa_translator"]

@@ -1,0 +1,39 @@
+This book is psychologically dense and should read like polished Persian nonfiction, not a literal machine translation.
+Preserve conceptual nuance, inner conflict, and emotionally charged ambiguity.
+Use standard Persian equivalents for established psychological and philosophical terms when they exist.
+Keep the prose readable and elegant, but do not simplify difficult arguments too aggressively.
+Maintain terminology consistency across chapters.
+
+### Conceptual Fidelity and Cross-Language Precision
+
+When translating philosophical or psychological material, prioritize **conceptual fidelity over literal word substitution**.
+
+* Preserve the **intended philosophical meaning** of each sentence even when Persian requires structural changes.
+* Avoid overly literal phrasing that would sound unnatural or obscure the author's argument.
+
+For **core philosophical or psychological concepts**, follow these rules:
+
+1. **Established Persian equivalents**
+
+   * If a concept has a well-established Persian translation in academic or philosophical literature, use that standard term consistently.
+
+2. **Ambiguous or multi-layered concepts**
+
+   * If a concept carries multiple meanings (e.g., metaphysical, psychological, or existential), choose Persian phrasing that preserves the **same interpretive openness** as the original.
+
+3. **Concepts without exact Persian equivalents**
+
+   * Prefer a **clear Persian approximation** rather than inventing awkward literal constructions.
+   * If necessary, retain the conceptual integrity through elegant Persian phrasing rather than word-for-word mapping.
+
+4. **Consistency of key terminology**
+
+   * Maintain consistent Persian equivalents for recurring philosophical or psychological terms throughout the document.
+   * Do not translate the same concept differently across sections unless the context clearly requires it.
+
+5. **Authorial tone and intellectual rhythm**
+
+   * Preserve the author's reflective tone, argumentative flow, and conceptual pacing.
+   * Dense passages should remain intellectually rich rather than simplified.
+
+The final Persian text should read like **a high-quality literary translation produced by a professional human translator**, while remaining faithful to the philosophical depth and emotional nuance of the original work.
