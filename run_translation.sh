@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_PATH="$SCRIPT_DIR/$(basename -- "${BASH_SOURCE[0]}")"
 RUNS_DIR="$SCRIPT_DIR/.translator-runs"
 LAST_RUN_FILE="$RUNS_DIR/last-run"
+declare -a TRANSLATOR_CMD=()
 
 print_usage() {
   cat <<'EOF'
@@ -34,6 +35,42 @@ PY
 
 slugify() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
+}
+
+resolve_translator_cmd() {
+  if command -v uv > /dev/null 2>&1; then
+    TRANSLATOR_CMD=(uv run epub-fa-translator)
+    return 0
+  fi
+
+  if [[ -x "$SCRIPT_DIR/.venv/bin/epub-fa-translator" ]]; then
+    TRANSLATOR_CMD=("$SCRIPT_DIR/.venv/bin/epub-fa-translator")
+    return 0
+  fi
+
+  if [[ -x "$SCRIPT_DIR/.venv/bin/python" ]]; then
+    TRANSLATOR_CMD=(env "PYTHONPATH=$SCRIPT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" "$SCRIPT_DIR/.venv/bin/python" -m epub_fa_translator.main)
+    return 0
+  fi
+
+  if command -v epub-fa-translator > /dev/null 2>&1; then
+    TRANSLATOR_CMD=("$(command -v epub-fa-translator)")
+    return 0
+  fi
+
+  cat <<'EOF'
+No supported translator launcher was found.
+
+Supported options:
+  1. Install uv, then run: uv sync
+  2. Or create a local virtualenv and install the project:
+     python3 -m venv .venv
+     ./.venv/bin/pip install -U pip
+     ./.venv/bin/pip install -e .
+
+Then run ./run_translation.sh again.
+EOF
+  exit 1
 }
 
 is_pid_running() {
@@ -90,10 +127,13 @@ run_internal() {
   local exit_code
   local state="finished"
   local -a cmd
+  local -a exec_cmd
 
   if [[ -f "$pid_file" ]]; then
     pid="$(< "$pid_file")"
   fi
+
+  resolve_translator_cmd
 
   mkdir -p "$run_dir" "$work_dir"
   started_at="$(date -Is)"
@@ -112,7 +152,7 @@ run_internal() {
   } > "$meta_file"
 
   cmd=(
-    uv run epub-fa-translator
+    "${TRANSLATOR_CMD[@]}"
     "$input_path"
     "$output_path"
     --model "gpt-5.4"
@@ -128,11 +168,18 @@ run_internal() {
     cmd+=("$@")
   fi
 
+  exec_cmd=(
+    env
+    "PYTHONUNBUFFERED=1"
+    stdbuf -oL -eL
+    "${cmd[@]}"
+  )
+
   {
     printf '#!/usr/bin/env bash\n'
     printf 'cd %q\n' "$SCRIPT_DIR"
     printf 'exec '
-    printf '%q ' "${cmd[@]}"
+    printf '%q ' "${exec_cmd[@]}"
     printf '\n'
   } > "$command_file"
   chmod +x "$command_file"
@@ -145,11 +192,11 @@ run_internal() {
   printf 'Output: %s\n' "$output_path"
   printf 'Work dir: %s\n' "$work_dir"
   printf 'Command: '
-  printf '%q ' "${cmd[@]}"
+  printf '%q ' "${exec_cmd[@]}"
   printf '\n\n'
 
   set +e
-  stdbuf -oL -eL "${cmd[@]}"
+  "${exec_cmd[@]}"
   exit_code=$?
   set -e
 
@@ -191,10 +238,7 @@ main() {
     return 0
   fi
 
-  if ! command -v uv > /dev/null 2>&1; then
-    echo "uv is required but was not found in PATH."
-    exit 1
-  fi
+  resolve_translator_cmd
 
   mkdir -p "$RUNS_DIR"
 
