@@ -34,8 +34,12 @@ DEFAULT_CORPUS_TOTAL_CHARS = 80000
 DEFAULT_PDF_SECTION_CHAR_TARGET = 12000
 DEFAULT_PDF_MIN_SECTION_PARAGRAPHS = 6
 DEFAULT_PDF_MAX_SECTION_PARAGRAPHS = 24
+DEFAULT_BOOK_CONTEXT_SAMPLE_CHAPTERS = 5
+DEFAULT_BOOK_CONTEXT_TOTAL_CHARS = 24000
+DEFAULT_BOOK_CONTEXT_MAX_OUTPUT_TOKENS = 2200
 ANCHOR_STATE_FILENAME = "concept-anchors.json"
 ANCHOR_MARKDOWN_FILENAME = "concept-anchors.md"
+BOOK_CONTEXT_MARKDOWN_FILENAME = "book-context.md"
 XML_NS = "http://www.w3.org/XML/1998/namespace"
 XHTML_NS = "http://www.w3.org/1999/xhtml"
 EPUB_NS = "http://www.idpf.org/2007/ops"
@@ -86,6 +90,17 @@ class PdfSection:
     paragraphs: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class BookMetadata:
+    title: str
+    author: str = ""
+    description: str = ""
+    subjects: tuple[str, ...] = ()
+    publisher: str = ""
+    language: str = ""
+    identifier: str = ""
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     load_environment(args.env_file)
@@ -109,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         opf_path = find_opf_path(extracted_dir)
         opf_tree = parse_xml_file(opf_path)
         book_root = opf_path.parent
+        book_metadata = extract_book_metadata(opf_tree, fallback_title=input_epub.stem)
 
         font_bytes = resolve_vazirmatn_bytes(args.font_path, args.font_url)
         install_assets(book_root, font_bytes)
@@ -120,6 +136,16 @@ def main(argv: list[str] | None = None) -> int:
             raise RuntimeError("No XHTML chapters were found in the EPUB spine.")
 
         book_work_dir.mkdir(parents=True, exist_ok=True)
+        book_context = initialize_book_context(
+            client=client,
+            model=args.model,
+            metadata=book_metadata,
+            chapters=chapters,
+            context_path=book_work_dir / BOOK_CONTEXT_MARKDOWN_FILENAME,
+            max_output_tokens=args.max_output_tokens,
+            retries=args.retries,
+            force=args.force,
+        )
         print(f"Found {len(chapters)} chapter files to translate.")
 
         anchor_state = initialize_concept_anchors(
@@ -144,6 +170,7 @@ def main(argv: list[str] | None = None) -> int:
                 chapter=chapter,
                 total_chapters=len(chapters),
                 model=args.model,
+                book_context=book_context,
                 translation_context=translation_context,
                 work_dir=book_work_dir,
                 force=args.force,
@@ -316,6 +343,259 @@ def load_translation_context(inline_context: str, context_file: Path | None) -> 
     if context_file:
         parts.append(context_file.read_text(encoding="utf-8").strip())
     return "\n\n".join(part for part in parts if part)
+
+
+def normalize_whitespace(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def extract_opf_text_values(opf_tree: etree._ElementTree, xpath: str) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for match in opf_tree.xpath(xpath, namespaces=OPF_NS):
+        if isinstance(match, etree._Element):
+            text = " ".join(part.strip() for part in match.itertext() if part and part.strip())
+        else:
+            text = str(match)
+        normalized = normalize_whitespace(text)
+        key = normalized.casefold()
+        if not normalized or key in seen:
+            continue
+        seen.add(key)
+        values.append(normalized)
+    return values
+
+
+def extract_book_metadata(opf_tree: etree._ElementTree, fallback_title: str) -> BookMetadata:
+    title_values = extract_opf_text_values(opf_tree, "/opf:package/opf:metadata/dc:title")
+    creator_values = extract_opf_text_values(opf_tree, "/opf:package/opf:metadata/dc:creator")
+    description_values = [
+        *extract_opf_text_values(opf_tree, "/opf:package/opf:metadata/dc:description"),
+        *extract_opf_text_values(
+            opf_tree,
+            "/opf:package/opf:metadata/opf:meta[translate(@property, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
+            "'abcdefghijklmnopqrstuvwxyz')='description']",
+        ),
+        *extract_opf_text_values(
+            opf_tree,
+            "/opf:package/opf:metadata/opf:meta[translate(@name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
+            "'abcdefghijklmnopqrstuvwxyz')='description']/@content",
+        ),
+    ]
+    subject_values = extract_opf_text_values(opf_tree, "/opf:package/opf:metadata/dc:subject")
+    publisher_values = extract_opf_text_values(opf_tree, "/opf:package/opf:metadata/dc:publisher")
+    language_values = extract_opf_text_values(opf_tree, "/opf:package/opf:metadata/dc:language")
+    identifier_values = extract_opf_text_values(opf_tree, "/opf:package/opf:metadata/dc:identifier")
+
+    return BookMetadata(
+        title=title_values[0] if title_values else humanize_title(fallback_title),
+        author=", ".join(creator_values),
+        description=description_values[0] if description_values else "",
+        subjects=tuple(subject_values),
+        publisher=publisher_values[0] if publisher_values else "",
+        language=language_values[0] if language_values else "",
+        identifier=identifier_values[0] if identifier_values else "",
+    )
+
+
+def initialize_book_context(
+    client: OpenAI,
+    model: str,
+    metadata: BookMetadata,
+    chapters: list[ChapterTarget],
+    context_path: Path,
+    max_output_tokens: int,
+    retries: int,
+    force: bool,
+) -> str:
+    if context_path.exists() and not force:
+        cached = context_path.read_text(encoding="utf-8").strip()
+        if cached:
+            print("Loaded cached book context dossier.")
+            return cached
+
+    fallback_context = build_fallback_book_context(metadata, len(chapters))
+    corpus = build_book_context_corpus(chapters)
+    if not corpus.strip():
+        context_path.write_text(f"{fallback_context}\n", encoding="utf-8")
+        return fallback_context
+
+    print("Building book context dossier...")
+    try:
+        payload = request_json_object(
+            client=client,
+            model=model,
+            instructions=build_book_context_instructions(),
+            prompt=build_book_context_prompt(metadata=metadata, chapter_count=len(chapters), corpus=corpus),
+            max_output_tokens=min(max_output_tokens, DEFAULT_BOOK_CONTEXT_MAX_OUTPUT_TOKENS),
+            retries=retries,
+            purpose="build book context dossier",
+        )
+        book_context = format_book_context_markdown(metadata, len(chapters), payload)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  Warning: could not synthesize book context ({exc}). Using extracted metadata only.")
+        book_context = fallback_context
+
+    context_path.write_text(f"{book_context.rstrip()}\n", encoding="utf-8")
+    return book_context
+
+
+def build_book_context_instructions() -> str:
+    return textwrap.dedent(
+        """
+        You are preparing a compact translator dossier for an English-to-Persian book translation.
+
+        Infer only what is well supported by the metadata and source excerpts.
+        - identify the book's likely subject matter, scope, tone, and stylistic posture
+        - summarize the book in concise prose useful to a translator
+        - highlight recurring themes or conceptual domains that should remain coherent
+        - call out translation priorities such as terminology control, register, or voice
+        - do not invent unsupported plot details, names, or claims
+        - if evidence is incomplete, keep the wording cautious
+        - return valid JSON only
+
+        JSON schema:
+        {
+          "summary": "2-4 sentence translator-facing summary",
+          "genre_and_scope": "one short paragraph",
+          "tone_and_style": ["note", "..."],
+          "core_topics": ["topic", "..."],
+          "translation_priorities": ["priority", "..."]
+        }
+        """
+    ).strip()
+
+
+def build_book_context_prompt(metadata: BookMetadata, chapter_count: int, corpus: str) -> str:
+    metadata_lines = [
+        f"Title: {metadata.title or 'Unknown'}",
+        f"Author: {metadata.author or 'Unknown'}",
+        f"Language: {metadata.language or 'Unknown'}",
+        f"Publisher: {metadata.publisher or 'Unknown'}",
+        f"Identifier: {metadata.identifier or 'Unknown'}",
+        f"Chapter count: {chapter_count}",
+    ]
+    if metadata.subjects:
+        metadata_lines.append(f"Subjects: {', '.join(metadata.subjects)}")
+    if metadata.description:
+        metadata_lines.append(f"Description: {metadata.description}")
+
+    return textwrap.dedent(
+        f"""
+        Build a book-context dossier for downstream chapter-by-chapter translation.
+
+        Book metadata:
+        {chr(10).join(metadata_lines)}
+
+        Representative source excerpts:
+        {corpus}
+        """
+    ).strip()
+
+
+def format_book_context_markdown(metadata: BookMetadata, chapter_count: int, payload: dict) -> str:
+    summary = normalize_whitespace(str(payload.get("summary", "")))
+    genre_and_scope = normalize_whitespace(str(payload.get("genre_and_scope", "")))
+    tone_and_style = normalize_string_list(payload.get("tone_and_style", []))
+    core_topics = normalize_string_list(payload.get("core_topics", []))
+    translation_priorities = normalize_string_list(payload.get("translation_priorities", []))
+
+    lines = [
+        "# Book Context",
+        "",
+        "## Metadata",
+        f"- Title: {metadata.title or 'Unknown'}",
+        f"- Author: {metadata.author or 'Unknown'}",
+        f"- Source language: {metadata.language or 'Unknown'}",
+        f"- Chapter count: {chapter_count}",
+    ]
+    if metadata.publisher:
+        lines.append(f"- Publisher: {metadata.publisher}")
+    if metadata.subjects:
+        lines.append(f"- Subjects: {', '.join(metadata.subjects)}")
+    if metadata.description:
+        lines.extend(["", "## Source Description", metadata.description])
+    if summary:
+        lines.extend(["", "## Summary", summary])
+    if genre_and_scope:
+        lines.extend(["", "## Genre And Scope", genre_and_scope])
+    if tone_and_style:
+        lines.extend(["", "## Tone And Style", *[f"- {item}" for item in tone_and_style]])
+    if core_topics:
+        lines.extend(["", "## Core Topics", *[f"- {item}" for item in core_topics]])
+    if translation_priorities:
+        lines.extend(
+            ["", "## Translation Priorities", *[f"- {item}" for item in translation_priorities]]
+        )
+    return "\n".join(lines)
+
+
+def build_fallback_book_context(metadata: BookMetadata, chapter_count: int) -> str:
+    lines = [
+        "# Book Context",
+        "",
+        "## Metadata",
+        f"- Title: {metadata.title or 'Unknown'}",
+        f"- Author: {metadata.author or 'Unknown'}",
+        f"- Source language: {metadata.language or 'Unknown'}",
+        f"- Chapter count: {chapter_count}",
+    ]
+    if metadata.publisher:
+        lines.append(f"- Publisher: {metadata.publisher}")
+    if metadata.subjects:
+        lines.append(f"- Subjects: {', '.join(metadata.subjects)}")
+    if metadata.description:
+        lines.extend(["", "## Source Description", metadata.description])
+    return "\n".join(lines)
+
+
+def select_book_context_chapters(chapters: list[ChapterTarget]) -> list[ChapterTarget]:
+    if len(chapters) <= DEFAULT_BOOK_CONTEXT_SAMPLE_CHAPTERS:
+        return chapters
+
+    sample_indices: set[int] = set()
+    last_index = len(chapters) - 1
+    for slot in range(DEFAULT_BOOK_CONTEXT_SAMPLE_CHAPTERS):
+        sample_indices.add(round(slot * last_index / max(1, DEFAULT_BOOK_CONTEXT_SAMPLE_CHAPTERS - 1)))
+
+    selected = [chapters[index] for index in sorted(sample_indices)]
+    if len(selected) >= DEFAULT_BOOK_CONTEXT_SAMPLE_CHAPTERS:
+        return selected[:DEFAULT_BOOK_CONTEXT_SAMPLE_CHAPTERS]
+
+    selected_lookup = {chapter.index for chapter in selected}
+    for chapter in chapters:
+        if chapter.index in selected_lookup:
+            continue
+        selected.append(chapter)
+        if len(selected) >= DEFAULT_BOOK_CONTEXT_SAMPLE_CHAPTERS:
+            break
+    return sorted(selected, key=lambda chapter: chapter.index)
+
+
+def build_book_context_corpus(chapters: list[ChapterTarget]) -> str:
+    parts: list[str] = []
+    selected = select_book_context_chapters(chapters)
+    if not selected:
+        return ""
+
+    per_chapter_char_limit = max(1500, DEFAULT_BOOK_CONTEXT_TOTAL_CHARS // len(selected))
+    total_chars = 0
+    for chapter in selected:
+        chapter_text = extract_visible_text_from_xhtml(read_xmlish_text(chapter.absolute_path))
+        if not chapter_text:
+            continue
+        excerpt = chapter_text[:per_chapter_char_limit]
+        block = (
+            f"Chapter {chapter.index}: {chapter.label}\n"
+            f"Path: {chapter.relative_path}\n"
+            f"Excerpt:\n{excerpt}"
+        )
+        projected = total_chars + len(block)
+        if projected > DEFAULT_BOOK_CONTEXT_TOTAL_CHARS and parts:
+            break
+        parts.append(block)
+        total_chars = projected
+    return "\n\n".join(parts)
 
 
 def prepare_source_book(input_path: Path, extracted_dir: Path) -> None:
@@ -1341,6 +1621,7 @@ def process_chapter(
     chapter: ChapterTarget,
     total_chapters: int,
     model: str,
+    book_context: str,
     translation_context: str,
     work_dir: Path,
     force: bool,
@@ -1368,6 +1649,7 @@ def process_chapter(
             model=model,
             chapter=chapter,
             original_xhtml=original_xhtml,
+            book_context=book_context,
             translation_context=translation_context,
             max_output_tokens=max_output_tokens,
             retries=retries,
@@ -1644,6 +1926,7 @@ def translate_chapter(
     model: str,
     chapter: ChapterTarget,
     original_xhtml: str,
+    book_context: str,
     translation_context: str,
     max_output_tokens: int,
     retries: int,
@@ -1656,6 +1939,7 @@ def translate_chapter(
         response = client.responses.create(
             model=model,
             instructions=build_translation_instructions(
+                book_context=book_context,
                 translation_context=translation_context,
                 concept_anchor_text=format_anchor_state_for_prompt(anchor_state),
             ),
@@ -1700,7 +1984,9 @@ def translate_chapter(
     raise RuntimeError(f"Failed to translate {chapter.relative_path}: {last_error}")
 
 
-def build_translation_instructions(translation_context: str, concept_anchor_text: str) -> str:
+def build_translation_instructions(
+    book_context: str, translation_context: str, concept_anchor_text: str
+) -> str:
     base = textwrap.dedent(
         """
         You are an expert English-to-Persian literary translator working on EPUB XHTML.
@@ -1714,11 +2000,14 @@ def build_translation_instructions(translation_context: str, concept_anchor_text
         - use fluent Persian punctuation and zero-width non-joiner where appropriate
         - do not add explanations, markdown fences, comments, or any wrapper text
         - return one complete valid XHTML document only
+        - use the book context dossier to stay aligned with the book's identity, scope, and tone
         - if concept anchors are provided, treat them as translation anchors for consistency
         """
     ).strip()
 
     parts = [base, PSYCHOLOGICAL_TRANSLATION_BRIEF]
+    if book_context.strip():
+        parts.append(f"Book context dossier:\n{book_context.strip()}")
     if concept_anchor_text.strip():
         parts.append(concept_anchor_text.strip())
     if translation_context:
