@@ -3,4 +3,5 @@ uv run epub-fa-translator "denial-of-death.pdf" "book.epub" --context-file "tran
 
 # for running on the production server
 # put MODEL=... in .env first
+./run_translation.sh "/root/epub-translator/Marcus-Aurelius-Meditations.pdf" "/root/epub-translator/Marcus-Aurelius-Meditations-fa.epub"
 ./run_translation.sh "/root/epub-translator/The-Power-Of-Now-EckhartTolle.pdf" "/root/epub-translator/The-Power-Of-Now-EckhartTolle-fa.epub"
