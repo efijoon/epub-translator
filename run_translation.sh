@@ -155,7 +155,6 @@ run_internal() {
     "${TRANSLATOR_CMD[@]}"
     "$input_path"
     "$output_path"
-    --model "gpt-5.4"
     --env-file "$SCRIPT_DIR/.env"
     --context-file "$SCRIPT_DIR/translation-context.txt"
     --anchor-scan-chapters "0"

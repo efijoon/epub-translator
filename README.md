@@ -14,7 +14,7 @@ Translate an English EPUB or text-based PDF into a polished Persian EPUB chapter
 ## Requirements
 
 - Python 3.11+
-- `OPENAI_API_KEY` in `.env` or your environment
+- Either `OPENAI_API_KEY`, or both `AZURE_API_ENDPOINT` and `AZURE_API_KEY`, in `.env` or your environment
 
 ## Install
 
@@ -24,28 +24,36 @@ uv sync
 
 ## .env
 
-Create a local `.env` file:
+Create a local `.env` file for either OpenAI or Azure OpenAI:
 
 ```bash
 OPENAI_API_KEY=your_api_key
+MODEL=gpt-5.4
+```
+
+```bash
+AZURE_API_ENDPOINT=https://your-resource.openai.azure.com
+AZURE_API_KEY=your_azure_api_key
+MODEL=your_azure_deployment_name
 ```
 
 ## Usage
 
 ```bash
 uv run epub-fa-translator "/path/to/book.epub" "/path/to/book.fa.epub" \
-  --model "gpt-5.4" \
   --context-file "translation-context.example.txt"
 ```
 
 ```bash
 uv run epub-fa-translator "/path/to/book.pdf" "/path/to/book.fa.epub" \
-  --model "gpt-5.4" \
   --context-file "translation-context.example.txt"
 ```
 
 ## Notes
 
+- If `OPENAI_API_KEY` is set, the tool uses OpenAI directly.
+- If `OPENAI_API_KEY` is not set and both `AZURE_API_ENDPOINT` and `AZURE_API_KEY` are set, the tool uses Azure OpenAI through the same `openai` package.
+- The model/deployment name defaults to `MODEL` from `.env` or your environment, and can still be overridden with `--model`.
 - If `Vazirmatn` is not available locally, the tool tries official CDN-style download URLs automatically.
 - PDF input works best for text-based PDFs. Scanned/image PDFs should be OCRed first.
 - Per-chapter checkpoints are stored in `.translator-work/`, so reruns can resume without retranslating finished chapters.

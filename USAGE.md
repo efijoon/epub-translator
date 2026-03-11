@@ -1,5 +1,6 @@
 # for running on the local machine
-uv run epub-fa-translator "denial-of-death.pdf" "book.epub" --model "gpt-5.4" --context-file "translation-context.txt" --anchor-scan-chapters 0 --anchor-max-terms 120 --anchor-review-interval 3
+uv run epub-fa-translator "denial-of-death.pdf" "book.epub" --context-file "translation-context.txt" --anchor-scan-chapters 0 --anchor-max-terms 120 --anchor-review-interval 3
 
 # for running on the production server
-./run_translation.sh "/root/epub-translator/denial-of-death.pdf" "/root/epub-translator/book-fa.epub"
+# put MODEL=... in .env first
+./run_translation.sh "/root/epub-translator/Marcus-Aurelius-Meditations.pdf" "/root/epub-translator/Marcus-Aurelius-Meditations-fa.epub"

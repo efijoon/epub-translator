@@ -89,6 +89,7 @@ class PdfSection:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     load_environment(args.env_file)
+    args.model = resolve_model_name(args.model)
     input_epub = args.input_epub.resolve()
     output_epub = resolve_output_path(input_epub, args.output_epub)
     work_dir = args.work_dir.resolve()
@@ -97,8 +98,9 @@ def main(argv: list[str] | None = None) -> int:
     anchor_markdown_path = book_work_dir / ANCHOR_MARKDOWN_FILENAME
     translation_context = load_translation_context(args.context, args.context_file)
 
-    ensure_api_key_present()
-    client = OpenAI(max_retries=3, timeout=600.0)
+    provider_name = resolve_api_provider_name()
+    client = create_openai_client()
+    print(f"Using {provider_name} with model {args.model}.")
 
     with tempfile.TemporaryDirectory(prefix="epub-fa-") as temp_dir:
         extracted_dir = Path(temp_dir) / "book"
@@ -174,8 +176,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        default=DEFAULT_MODEL,
-        help=f"OpenAI model to use. Default: {DEFAULT_MODEL}",
+        default=None,
+        help=f"Model/deployment name to use. Defaults to MODEL env var if set, otherwise {DEFAULT_MODEL}.",
     )
     parser.add_argument(
         "--env-file",
@@ -263,9 +265,44 @@ def resolve_output_path(input_epub: Path, output_epub: Path | None) -> Path:
     return input_epub.with_name(f"{input_epub.stem}.fa.epub").resolve()
 
 
-def ensure_api_key_present() -> None:
-    if not os.environ.get("OPENAI_API_KEY"):
-        raise RuntimeError("Set OPENAI_API_KEY in your environment or .env file before running this tool.")
+def resolve_api_provider_name() -> str:
+    if os.environ.get("OPENAI_API_KEY"):
+        return "OpenAI"
+    if os.environ.get("AZURE_API_ENDPOINT") and os.environ.get("AZURE_API_KEY"):
+        return "Azure OpenAI"
+    if os.environ.get("AZURE_API_ENDPOINT") or os.environ.get("AZURE_API_KEY"):
+        raise RuntimeError(
+            "Azure OpenAI configuration is incomplete. Set both AZURE_API_ENDPOINT and "
+            "AZURE_API_KEY, or set OPENAI_API_KEY."
+        )
+    raise RuntimeError(
+        "Set OPENAI_API_KEY in your environment or .env file, or set both "
+        "AZURE_API_ENDPOINT and AZURE_API_KEY for Azure OpenAI."
+    )
+
+
+def resolve_model_name(cli_model: str | None) -> str:
+    if cli_model:
+        return cli_model
+    env_model = os.environ.get("MODEL", "").strip()
+    if env_model:
+        return env_model
+    return DEFAULT_MODEL
+
+
+def create_openai_client() -> OpenAI:
+    provider_name = resolve_api_provider_name()
+    if provider_name == "Azure OpenAI":
+        endpoint = os.environ["AZURE_API_ENDPOINT"].rstrip("/")
+        return OpenAI(
+            base_url=f"{endpoint}/openai/v1",
+            api_key=os.environ["AZURE_API_KEY"],
+            default_headers={"x-ms-useragent": "AzureOpenAI.Studio/ai.azure.com"},
+            max_retries=3,
+            timeout=600.0,
+        )
+
+    return OpenAI(api_key=os.environ["OPENAI_API_KEY"], max_retries=3, timeout=600.0)
 
 
 def load_environment(env_file: Path) -> None:
@@ -454,6 +491,10 @@ def assemble_pdf_sections(
 
     for block_type, text in blocks:
         if block_type == "heading":
+            # PDF page headers often repeat the current section title on every page.
+            # Treat equivalent consecutive headings as running headers, not new sections.
+            if are_equivalent_pdf_headings(text, current_title):
+                continue
             if current_paragraphs:
                 sections.extend(chunk_pdf_section(current_title, current_paragraphs))
                 current_paragraphs = []
@@ -503,6 +544,18 @@ def chunk_pdf_section(title: str, paragraphs: list[str]) -> list[PdfSection]:
         chunks.append(make_pdf_section(title, len(chunks) + 1, current))
 
     return chunks
+
+
+def are_equivalent_pdf_headings(left: str, right: str) -> bool:
+    return normalize_pdf_heading_key(left) == normalize_pdf_heading_key(right)
+
+
+def normalize_pdf_heading_key(text: str) -> str:
+    normalized = normalize_pdf_line(text).casefold()
+    normalized = re.sub(r"^[^a-z0-9ivxlcdm]+|[^a-z0-9ivxlcdm]+$", "", normalized)
+    normalized = re.sub(r"^the\s+", "", normalized)
+    normalized = re.sub(r"[^\w\s]+", " ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
 
 
 def make_pdf_section(title: str, index: int, paragraphs: list[str]) -> PdfSection:
