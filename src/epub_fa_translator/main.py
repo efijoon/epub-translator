@@ -22,6 +22,7 @@ from openai import OpenAI
 from pypdf import PdfReader
 
 DEFAULT_MODEL = "gpt-5.4"
+DEFAULT_FALLBACK_MODEL: str | None = None
 DEFAULT_WORK_DIR = Path(".translator-work")
 DEFAULT_MAX_OUTPUT_TOKENS = 32000
 DEFAULT_RETRIES = 3
@@ -105,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     load_environment(args.env_file)
     args.model = resolve_model_name(args.model)
+    args.fallback_model = resolve_fallback_model_name(args.fallback_model)
     input_epub = args.input_epub.resolve()
     output_epub = resolve_output_path(input_epub, args.output_epub)
     work_dir = args.work_dir.resolve()
@@ -116,6 +118,8 @@ def main(argv: list[str] | None = None) -> int:
     provider_name = resolve_api_provider_name()
     client = create_openai_client()
     print(f"Using {provider_name} with model {args.model}.")
+    if args.fallback_model:
+        print(f"Fallback model on content_filter: {args.fallback_model}.")
 
     with tempfile.TemporaryDirectory(prefix="epub-fa-") as temp_dir:
         extracted_dir = Path(temp_dir) / "book"
@@ -170,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
                 chapter=chapter,
                 total_chapters=len(chapters),
                 model=args.model,
+                fallback_model=args.fallback_model,
                 book_context=book_context,
                 translation_context=translation_context,
                 work_dir=book_work_dir,
@@ -205,6 +210,14 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--model",
         default=None,
         help=f"Model/deployment name to use. Defaults to MODEL env var if set, otherwise {DEFAULT_MODEL}.",
+    )
+    parser.add_argument(
+        "--fallback-model",
+        default=None,
+        help=(
+            "Model/deployment name to fall back to when the primary model's response is blocked "
+            "by a content filter. Defaults to FALLBACK_MODEL env var if set, otherwise no fallback."
+        ),
     )
     parser.add_argument(
         "--env-file",
@@ -315,6 +328,15 @@ def resolve_model_name(cli_model: str | None) -> str:
     if env_model:
         return env_model
     return DEFAULT_MODEL
+
+
+def resolve_fallback_model_name(cli_fallback_model: str | None) -> str | None:
+    if cli_fallback_model:
+        return cli_fallback_model
+    env_model = os.environ.get("FALLBACK_MODEL", "").strip()
+    if env_model:
+        return env_model
+    return DEFAULT_FALLBACK_MODEL
 
 
 def create_openai_client() -> OpenAI:
@@ -1632,6 +1654,7 @@ def process_chapter(
     anchor_markdown_path: Path,
     skip_concept_anchoring: bool,
     anchor_review_interval: int,
+    fallback_model: str | None = None,
 ) -> dict:
     print(f"[{chapter.index}/{total_chapters}] Translating {chapter.relative_path}...")
     cache_path = work_dir / f"{chapter.index:03d}-{safe_slug(chapter.label)}.translated.xhtml"
@@ -1647,6 +1670,7 @@ def process_chapter(
         translated_xhtml = translate_chapter(
             client=client,
             model=model,
+            fallback_model=fallback_model,
             chapter=chapter,
             original_xhtml=original_xhtml,
             book_context=book_context,
@@ -1931,13 +1955,15 @@ def translate_chapter(
     max_output_tokens: int,
     retries: int,
     anchor_state: dict,
+    fallback_model: str | None = None,
 ) -> str:
     feedback = ""
     last_error = "Unknown error"
+    active_model = model
 
     for attempt in range(1, retries + 1):
         response = client.responses.create(
-            model=model,
+            model=active_model,
             instructions=build_translation_instructions(
                 book_context=book_context,
                 translation_context=translation_context,
@@ -1961,12 +1987,25 @@ def translate_chapter(
             last_error = f"Model status was {status}: {incomplete}"
             reason = getattr(incomplete, "reason", "") if incomplete else ""
             if reason == "content_filter":
-                feedback = (
-                    "Your previous response was blocked by a content filter. This is a published, "
-                    "internationally distributed book — every passage is legitimate published text "
-                    "that must be translated completely. Do not refuse or omit any part. "
-                    "Return the full translated XHTML document with no omissions and no commentary."
-                )
+                if fallback_model and active_model != fallback_model:
+                    print(
+                        f"  Content filter triggered on model '{active_model}'. "
+                        f"Switching to fallback model '{fallback_model}'."
+                    )
+                    active_model = fallback_model
+                    feedback = (
+                        "Your previous response was blocked by a content filter. This is a published, "
+                        "internationally distributed book — every passage is legitimate published text "
+                        "that must be translated completely. Do not refuse or omit any part. "
+                        "Return the full translated XHTML document with no omissions and no commentary."
+                    )
+                else:
+                    feedback = (
+                        "Your previous response was blocked by a content filter. This is a published, "
+                        "internationally distributed book — every passage is legitimate published text "
+                        "that must be translated completely. Do not refuse or omit any part. "
+                        "Return the full translated XHTML document with no omissions and no commentary."
+                    )
             else:
                 feedback = (
                     "Your previous answer was incomplete. Return the full translated XHTML document "
